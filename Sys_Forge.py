@@ -45,11 +45,11 @@ proof_data = {
 #  FONTS & CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 FONT_TITLE  = ("Courier New", 14, "bold")
-FONT_HEAD   = ("Courier New", 9,  "bold")
-FONT_MONO   = ("Courier New", 8)
+FONT_HEAD   = ("Courier New", 10, "bold")
+FONT_MONO   = ("Courier New", 9)
 FONT_BIG    = ("Courier New", 22, "bold")
 FONT_MED    = ("Courier New", 14, "bold")
-FONT_SM     = ("Courier New", 7)
+FONT_SM     = ("Courier New", 9)
 HISTORY_LEN = 60
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,9 +251,11 @@ class WaveformCanvas(tk.Canvas):
 class MonitorTab(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=ACTIVE_THEME["bg"])
-        self._core_count = psutil.cpu_count(logical=True) or 4
-        self._total_ram  = psutil.virtual_memory().total / (1024**2)
-        self._stress_on  = False
+        self._core_count  = psutil.cpu_count(logical=True) or 4
+        self._total_ram   = psutil.virtual_memory().total / (1024**2)
+        self._stress_on   = False
+        self._wmi_counter = 0       # throttle: only query WMI every N polls
+        self._cached_temp = 42.0    # last known temperature (°C)
         self._build_ui()
         self._start_thread()
         self._poll_gui()
@@ -401,31 +403,38 @@ class MonitorTab(tk.Frame):
             return "Windows Display Adapter"
 
     def _query_thermals_and_fans(self, cpu_pct):
+        # ── CPU Frequency (fast, no subprocess) ──
         freq_val = 0.0
         try:
             fq = psutil.cpu_freq()
             if fq and fq.current: freq_val = fq.current / 1000.0
         except Exception: pass
 
-        temp_val = 38.0 + (cpu_pct * 0.38)
-        try:
-            import subprocess
-            r = subprocess.run(
-                ["wmic", "/namespace:\\\\root\\wmi", "PATH", "MSAcpi_ThermalZoneTemperature", "get", "CurrentTemperature"],
-                capture_output=True, text=True, timeout=1)
-            lines = [l.strip() for l in r.stdout.splitlines() if l.strip().isdigit()]
-            if lines:
-                raw_k = float(lines[0])
-                temp_val = round((raw_k / 10.0) - 273.15, 1)
-        except Exception: pass
+        # ── Temperature: only call wmic every 20 polls (~10 s) ──
+        self._wmi_counter += 1
+        if self._wmi_counter % 20 == 1:
+            temp_estimate = 38.0 + (cpu_pct * 0.38)
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["wmic", "/namespace:\\\\root\\wmi", "PATH",
+                     "MSAcpi_ThermalZoneTemperature", "get", "CurrentTemperature"],
+                    capture_output=True, text=True, timeout=2)
+                lines = [l.strip() for l in r.stdout.splitlines() if l.strip().isdigit()]
+                if lines:
+                    raw_k = float(lines[0])
+                    temp_estimate = round((raw_k / 10.0) - 273.15, 1)
+            except Exception: pass
+            self._cached_temp = round(max(30.0, min(95.0, temp_estimate)), 1)
 
-        temp_val = round(max(30.0, min(95.0, temp_val)), 1)
-        fan_rpm = int(1400 + (cpu_pct * 12))
+        temp_val  = self._cached_temp
+        fan_rpm   = int(1400 + (cpu_pct * 12))
         fan_working = "● NORMAL (AUTO)" if cpu_pct < 85 else "● HIGH SPEED"
 
         return freq_val, temp_val, fan_rpm, fan_working
 
     def _start_thread(self):
+        # Warm-up call so first real reading is accurate
         psutil.cpu_percent(interval=None, percpu=True)
         threading.Thread(target=self._poll_hw, daemon=True).start()
 
@@ -433,7 +442,8 @@ class MonitorTab(tk.Frame):
         prev = time.monotonic()
         while True:
             t0 = time.monotonic()
-            per = psutil.cpu_percent(interval=0.2, percpu=True)
+            time.sleep(0.45)                                      # non-blocking wait
+            per = psutil.cpu_percent(interval=None, percpu=True)  # instant read after warm-up
             avg = sum(per) / len(per) if per else 0.0
             vm = psutil.virtual_memory()
             used_mb = vm.used / (1024**2)
@@ -1127,6 +1137,17 @@ class ProofPanel(tk.Toplevel):
 class SysForge(tk.Tk):
     def __init__(self):
         super().__init__()
+
+        # ── Sharp rendering on high-DPI / 4K displays ──
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+        # ── Use 'clam' ttk theme so fieldbackground / custom colors work on Windows ──
+        ttk.Style(self).theme_use('clam')
+
         self.title("SYSFORGE — Real-Time Parallel Cyber-Dashboard")
         self.configure(bg=ACTIVE_THEME["bg"])
         self.geometry("1280x820")
