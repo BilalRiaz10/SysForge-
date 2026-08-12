@@ -1,3 +1,4 @@
+# SysForge — Real-Time Parallel Windows System Utility (UI Polished & High Performance)
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
